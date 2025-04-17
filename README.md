@@ -1,12 +1,11 @@
 # Breast Cancer Segmentation and Classification System
 
-This repository contains a two-step pipeline for processing breast cancer images. The system first segments images to localize regions with cancerous cells, and then classifies the segmented images as benign or malignant using radiomics features and an SVM classifier. The project is built with object‑oriented design and a modular structure, making it easy to maintain and extend.
+This repository contains a two-step pipeline for processing breast cancer images. The system first segments images to localize regions with possible cancerous cells, and then classifies the segmented images as benign or malignant using radiomics features and an SVM classifier.
 
 ## Table of Contents
 
 - [Overview](#overview)
 - [Project Structure](#project-structure)
-- [Features](#features)
 - [Requirements](#requirements)
 - [Installation](#installation)
 
@@ -14,11 +13,77 @@ This repository contains a two-step pipeline for processing breast cancer images
 
 This project is divided into two main steps:
 
-1. **Segmentation:**  
-   Loads breast cancer images along with their corresponding ground truth masks using a custom PyTorch dataset. It uses a modified DeepLabV3 segmentation model with a custom segmentation head to predict segmentation masks. The training pipeline includes data augmentation, early stopping, K-Fold cross validation, and visualization of the segmentation predictions.
+1. **Segmentation:**
+   
+   1.1. **Loading the Data:**
 
-2. **Classification:**  
-   After segmentation, radiomic features are extracted from the segmented outputs using PyRadiomics. These features are preprocessed (normalized, outlier-filtered, and reduced via feature selection) and balanced using SMOTE (applied **only** on the training set). An SVM classifier is then trained using GridSearchCV with K-Fold cross validation, and the decision threshold is fine-tuned for optimal performance.
+   - We’ve built a small helper (a “custom Dataset”) so that, when you point it at a folder, it will automatically find each image and its       matching mask (the file with _mask in its name).
+
+   - Every time we ask for a sample, it returns both the raw grayscale image and the binary mask that tells us where the cancerous cells          actually are.
+  
+   1.2. **The Segmentation Model:**
+
+   - Under the hood we start with DeepLabV3 (a state‑of‑the‑art semantic segmentation network) that’s been pre‑trained on a large dataset.
+
+   - Because our images are single‑channel (grayscale) instead of three‑channel (RGB), we swap out the very first convolution so it only         expects one channel.
+     
+   - We also replace the final “classifier” part of DeepLab with a small custom block that ends in a single‑channel output—i.e. one number       per pixel predicting “cancer” vs. “no cancer.”
+  
+   1.3. **Making Training Robust:**
+
+   - *Data Augmentation:* Before each training pass we randomly flip, rotate, warp, or shift the images so the model learns to handle small        variations in cell shape or orientation.
+
+   - *Early Stopping:* We keep an eye on performance on a held‑out validation set. As soon as validation loss stops improving for a set          number of epochs, we halt training—this prevents the model from “overfitting” (memorizing details that don’t generalize).
+     
+   - *K‑Fold Cross Validation:* Instead of a single train/validation split, we divide the dataset into K chunks. We train K different
+     times, each time holding out a different chunk for validation. This gives a more reliable estimate of how well the model will do on
+     brand‑new data.
+
+
+3. **Classification:**
+   
+   1.1. **Starting with Segmentation Outputs:**
+
+   - Instead of the raw microscope images, we now feed into our next stage the predicted masks (or ground‑truth masks) produced by the segmentation model.
+
+   - Each mask identifies exactly which pixels belong to a cell region. We pair each mask back with its original image to focus our analysis on just those cellular areas.
+  
+   1.2. **Radiomic Feature Extraction:**
+
+   - Using PyRadiomics, we compute a large set of quantitative features from each image/mask pair—things like texture measures (how speckled or smooth the region is), shape descriptors (compactness, elongation), and intensity statistics (mean brightness, variance).
+
+   - The result is a big table: one row per image, and one column for every radiomic feature plus a “label” column (0 for benign, 1 for malignant).
+  
+   1.3. **Preprocessing the Feature Table:**
+
+   - *Normalization:* We convert each feature to a z‑score (subtract the mean, divide by the standard deviation) so that features on wildly different scales become comparable.
+     
+   - *Outlier Filtering:* Some images might have extreme values in many features (perhaps due to artifacts). We drop any case where more than a small fraction of its features are “too far” (e.g. |z|>2.5) from the norm.
+  
+   - *Train/Test Split:* We split our cleaned table into a training set and a test set before doing anything else—so that nothing we do on the train data ever “peeks” at the test samples.
+  
+   - *SMOTE Balancing:* Real datasets often have more benign than malignant examples. On the training set only, we apply SMOTE to synthetically up‑sample the minority class (malignant) so that both classes are equally represented during training. The test set remains untouched and purely real.
+  
+   1.4. **Feature Selection:**
+
+   - Hundreds of radiomic features can overwhelm even a powerful classifier. We use a simple filter like SelectKBest (with a mutual‑information score) to pick the top K features that carry the most signal about benign vs. malignant.
+
+   - This both speeds up training and reduces the risk of overfitting.
+  
+   1.5. **Training the SVM Classifier:**
+
+   - We initialize an SVC (support‑vector machine) and set up a GridSearchCV over hyperparameters like the penalty term C and kernel type (linear, RBF, etc.).
+
+   - We nest that inside a K‑Fold cross‑validation loop on the training data so that each combination of parameters is evaluated multiple times on different splits.
+     
+   - We track metrics like accuracy, sensitivity (true‑positive rate), and specificity (true‑negative rate) in each fold, and pick the final model that maximizes sensitivity (to catch as many malignant cases as possible).
+  
+   1.6. **Final Evaluation:**
+
+   - We run the tuned model on the hold‑out test set—which has never been used for SMOTE, normalization parameters, or feature selection decisions—to get an honest estimate of real‑world performance.
+
+   - We report a full classification report (precision, recall/sensitivity, F1) and show a confusion matrix heatmap so you can see exactly how many benign vs. malignant cases were correctly or incorrectly labeled.
+     
 
 ## Project Structure
 
@@ -39,23 +104,6 @@ project_folder/
 │   └── main.py                  # Main script to run classification experiments
 └── README.md                    # This file
 ```
-
-## Features
-
-- **Segmentation:**
-  - Custom PyTorch `Dataset` for loading images and masks.
-  - Modified DeepLabV3 with a custom segmentation head for single-channel (grayscale) inputs.
-  - Data augmentation using Albumentations.
-  - Training with early stopping and K-Fold cross validation.
-  - Visualization tools for displaying input images, true masks, and predicted masks.
-
-- **Classification:**
-  - Radiomic feature extraction from segmented images using PyRadiomics.
-  - A preprocessing pipeline to normalize features, remove outliers, and perform feature selection.
-  - SMOTE oversampling applied only on the training set (to avoid synthetic data in the test set).
-  - SVM classification using GridSearchCV with K-Fold cross validation.
-  - Threshold adjustment for fine-tuning classifier predictions.
-  - Evaluation through classification reports, confusion matrices, and performance metrics.
  
 ## Results
 
@@ -74,18 +122,62 @@ This section summarizes the results obtained for both segmentation and classific
 - **Validation Accuracy:** _[95.92%]_
 
 **Graphs:**
-- **Train-Test Loss Graph:**  
-  ![Loss Graph](path/to/loss_graph.png)  
-  _Figure: The training loss and validation loss over the epochs._
+- **Train-Test Loss Graph:**
+
+  <a href="url">
+  <img src="https://github.com/ekaraali/Breast_Cancer_Detection_System/blob/main/images/seg_train_loss_curve.png?raw=true" style="width:750px; height:auto;" alt="Loss Curve">
+  </a>
 
 **Sample Outputs:**
 - **Segmented Images:**  
-  - **Input Image:**  
-    ![Input Image](path/to/input_image.png)
-  - **Ground Truth Mask:**  
-    ![Ground Truth Mask](path/to/gt_mask.png)
-  - **Predicted Segmentation:**  
-    ![Predicted Segmentation](path/to/predicted_mask.png)
+
+<table align="center">
+  <tr>
+    <td align="center">
+      <a href="url">
+        <img src="https://github.com/ekaraali/Breast_Cancer_Detection_System/blob/main/images/gt.png?raw=true" width=auto alt="Input Image">
+      </a><br>
+      <strong>Input Image</strong>
+    </td>
+    <td align="center">
+      <a href="url">
+        <img src="https://github.com/ekaraali/Breast_Cancer_Detection_System/blob/main/images/true_mask.png?raw=true" width=auto alt="Ground Truth Mask">
+      </a><br>
+      <strong>Ground Truth Mask</strong>
+    </td>
+    <td align="center">
+      <a href="url">
+        <img src="https://github.com/ekaraali/Breast_Cancer_Detection_System/blob/main/images/predicted_mask.png?raw=true" width=auto alt="Predicted Segmentation">
+      </a><br>
+      <strong>Predicted Segmentation</strong>
+    </td>
+  </tr>
+</table>
+
+<table align="center">
+  <tr>
+    <td align="center">
+      <a href="url">
+        <img src="https://github.com/ekaraali/Breast_Cancer_Detection_System/blob/main/images/gt2.png?raw=true" width=285 alt="Input Image">
+      </a><br>
+      <strong>Input Image</strong>
+    </td>
+    <td align="center">
+      <a href="url">
+        <img src="https://github.com/ekaraali/Breast_Cancer_Detection_System/blob/main/images/true_mask2.png?raw=true" width=285 alt="Ground Truth Mask">
+      </a><br>
+      <strong>Ground Truth Mask</strong>
+    </td>
+    <td align="center">
+      <a href="url">
+        <img src="https://github.com/ekaraali/Breast_Cancer_Detection_System/blob/main/images/predicted_mask2.png?raw=true" width=285 alt="Predicted Segmentation">
+      </a><br>
+      <strong>Predicted Segmentation</strong>
+    </td>
+  </tr>
+</table>
+
+
 
 ### Classification Results
 
@@ -101,11 +193,13 @@ This section summarizes the results obtained for both segmentation and classific
 
 **Graphs:**
 - **ROC Curve:**  
-  ![ROC Curve](path/to/roc_curve.png)  
-  _Figure: ROC curve for the best SVM model._
+    <a href="url">
+  <img src="https://github.com/ekaraali/Breast_Cancer_Detection_System/blob/main/images/roc_curve.png?raw=true" style="width:550px; height:auto;" alt="Loss Curve">
+  </a>
 - **Sensitivity-Specificity Trade-off:**  
-  ![Trade-off Graph](path/to/tradeoff_graph.png)  
-  _Figure: Trade-off between sensitivity and specificity illustrating the decision threshold effects._
+    <a href="url">
+  <img src="https://github.com/ekaraali/Breast_Cancer_Detection_System/blob/main/images/trade_off.png?raw=true" style="width:550px; height:auto;" alt="Loss Curve">
+  </a>
 
 
 ## Requirements
